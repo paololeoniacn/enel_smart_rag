@@ -1,0 +1,72 @@
+# Environment and Secrets
+.env
+.env.local
+token.json
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# IDE and Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Project Specific - DATA & STORAGE (LOCALE)
+# ChromaDB (Database vettoriale - NON versionare se contiene dati sensibili o è pesante)
+chroma_store/
+
+# HuggingFace Cache (Modelli scaricati)
+hf_cache/
+
+# Processed Docs (Opzionale: se li vuoi su Git, rimuovi questa riga. Se sono giganti, ignorali)
+# processed_docs/
+knowledge/docs/*.md
+
+# Streamlit
+.streamlit/
+
+# Temporary / Scratch
+tmp/
+temp/
+RESULTS/
+*.bak
+*.tmp
