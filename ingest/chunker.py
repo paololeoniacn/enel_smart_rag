@@ -1,11 +1,21 @@
 from pathlib import Path
 import re
 
+# Patterns per identificare sezioni di descrizione immagini
+_IMAGE_SECTION_PATTERN = re.compile(
+    r'\.(png|jpg|jpeg|gif|bmp|svg|drawio|webp)$', re.IGNORECASE
+)
+
+def _is_image_section(section_name: str) -> bool:
+    """Determina se una sezione è una descrizione auto-generata di un'immagine."""
+    return bool(_IMAGE_SECTION_PATTERN.search(section_name.strip()))
+
 # === CHUNKER SPECIALIZZATO PER MARKDOWN PROCESSATI ===
 
 def chunk_markdown_file(text: str, filename: str, chunk_size: int = 1500, overlap: int = 200) -> list[dict]:
     """
     Chunking ottimizzato per file Markdown pre-processati con Header di Metadati.
+    Ogni chunk eredita il titolo della sezione in cui si trova (Contextual Chunking).
     """
     # 1. Estrazione Header e Metadati
     header_lines = []
@@ -45,23 +55,48 @@ def chunk_markdown_file(text: str, filename: str, chunk_size: int = 1500, overla
             body_lines.append(line)
 
     body_text = "\n".join(body_lines).strip()
-    
-    context_prefix = f"DOCUMENT CONTEXT:\nSource: {filename}\nPath: {metadata.get('original_path', 'N/A')}\n\nCONTENT:\n"
 
-    # 2. Chunking del Body
+    # 2. Chunking del Body con Contextual Headings
     paragraphs = re.split(r'\n\s*\n', body_text)
     
     chunks = []
     current_chunk = ""
     chunk_index = 0
+    current_section = filename  # Sezione corrente (default: nome file)
     
     for para in paragraphs:
+        # Traccia la sezione corrente: cerca headings (#, ##, ###)
+        # e anche righe che sembrano titoli di API (es. "GET/me/cn/..." o "POST /me/...")
+        heading_match = re.match(r'^(#{1,4})\s+(.+)', para.strip())
+        api_match = re.match(r'^(GET|POST|PUT|PATCH|DELETE)\s*/?(.+)', para.strip())
+        
+        if heading_match:
+            current_section = heading_match.group(2).strip()
+        elif api_match:
+            current_section = f"{api_match.group(1)} /{api_match.group(2).strip()}"
+        
+        # Costruisci il context_prefix con la sezione corrente
+        context_prefix = (
+            f"DOCUMENT CONTEXT:\n"
+            f"Source: {filename}\n"
+            f"Section: {current_section}\n"
+            f"Path: {metadata.get('original_path', '')}\n\n"
+            f"CONTENT:\n"
+        )
+        
         current_len = len(current_chunk) + len(context_prefix)
         para_len = len(para)
         
         if current_len + para_len > chunk_size:
             if current_chunk:
-                chunks.append(_make_chunk(current_chunk, filename, chunk_index, metadata, context_prefix))
+                # Usa il context_prefix con la sezione corrente al momento della creazione
+                chunk_meta = metadata.copy()
+                chunk_meta["section"] = current_section
+                if _is_image_section(current_section):
+                    chunk_meta["chunk_type"] = "image_description"
+                else:
+                    chunk_meta["chunk_type"] = "content"
+                chunks.append(_make_chunk(current_chunk, filename, chunk_index, chunk_meta, context_prefix))
                 chunk_index += 1
                 current_chunk = ""
             
@@ -73,7 +108,13 @@ def chunk_markdown_file(text: str, filename: str, chunk_size: int = 1500, overla
                      step = chunk_size - len(context_prefix)
                      for i in range(0, len(para), step):
                         sub_para = para[i:i+step]
-                        chunks.append(_make_chunk(sub_para, filename, chunk_index, metadata, context_prefix))
+                        chunk_meta = metadata.copy()
+                        chunk_meta["section"] = current_section
+                        if _is_image_section(current_section):
+                            chunk_meta["chunk_type"] = "image_description"
+                        else:
+                            chunk_meta["chunk_type"] = "content"
+                        chunks.append(_make_chunk(sub_para, filename, chunk_index, chunk_meta, context_prefix))
                         chunk_index += 1
             else:
                 current_chunk = para
@@ -84,7 +125,20 @@ def chunk_markdown_file(text: str, filename: str, chunk_size: int = 1500, overla
                 current_chunk = para
                 
     if current_chunk:
-        chunks.append(_make_chunk(current_chunk, filename, chunk_index, metadata, context_prefix))
+        context_prefix = (
+            f"DOCUMENT CONTEXT:\n"
+            f"Source: {filename}\n"
+            f"Section: {current_section}\n"
+            f"Path: {metadata.get('original_path', '')}\n\n"
+            f"CONTENT:\n"
+        )
+        chunk_meta = metadata.copy()
+        chunk_meta["section"] = current_section
+        if _is_image_section(current_section):
+            chunk_meta["chunk_type"] = "image_description"
+        else:
+            chunk_meta["chunk_type"] = "content"
+        chunks.append(_make_chunk(current_chunk, filename, chunk_index, chunk_meta, context_prefix))
         
     return chunks
 

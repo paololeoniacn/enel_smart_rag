@@ -45,7 +45,7 @@ def load_orchestrator():
     return Orchestrator()
 
 # Header
-st.title("⚡ Enel Smart RAG")
+st.title("⚡ Energy Smart RAG")
 st.caption(f"Sistema Agentico Locale • {config.model_name}")
 
 # Caricamento Modello con Feedback Visivo

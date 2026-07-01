@@ -4,7 +4,8 @@ class Config(BaseModel):
     # Modello
     # model_name: str = "qwen3:30b-a3b"  # 30B (Pesante)
     # model_name: str = "deepseek-r1:14b" # Reasoning (Troppo verboso)
-    model_name: str = "qwen2.5:14b"      # 14B (Bilanciato per Mac 24GB)
+    # model_name: str = "qwen2.5:14b"      # 14B Base (Instabile con tool calling)
+    model_name: str = "qwen2.5:14b-instruct-q4_K_M"  # 14B Instruct (Tool calling nativo)
     ollama_base_url: str = "http://localhost:11434"
     
     # Embedding

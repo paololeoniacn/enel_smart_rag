@@ -1,294 +1,205 @@
-import json
-import re
 import time
 import ollama
 from config import config
 from tools.knowledge_base import KnowledgeBase
 
-SYSTEM_PROMPT = """
-Sei un sistema agentico di ricerca e analisi documentale. Il tuo compito è rispondere
-alle domande dell'utente con la massima accuratezza, utilizzando strumenti specifici
-per cercare, verificare e sintetizzare informazioni.
-
-## PRINCIPI FONDAMENTALI
-
-1. MAI rispondere basandoti solo sulla tua conoscenza interna quando hai strumenti disponibili
-2. SEMPRE cercare nelle fonti prima di rispondere
-3. Se la prima ricerca non è sufficiente, RIFORMULA e cerca di nuovo (max 3 tentativi)
-4. Se trovi informazioni contraddittorie, SEGNALALO esplicitamente
-5. CITA sempre la fonte specifica (nome documento, sezione, pagina se disponibile)
-6. Se non trovi risposta, DILLO chiaramente — non inventare
-
-## STRUMENTI DISPONIBILI
-
-### search_knowledge_base
-Cerca nella knowledge base locale.
-Parametri: {"query": "stringa di ricerca", "n_results": 5}
-Usa questo strumento come PRIMA azione per qualsiasi domanda fattuale.
-
-
-### verify_claim
-Verifica un'affermazione cercando conferme o smentite nelle fonti.
-Parametri: {"claim": "affermazione da verificare", "context": "contesto originale"}
-Usa DOPO aver ottenuto risultati dal retriever, per validare informazioni critiche.
-
-### ask_user_clarification
-Chiedi chiarimenti all'utente se la domanda è ambigua.
-Parametri: {"question": "domanda di chiarimento"}
-Usa SOLO se la domanda è genuinamente ambigua, non per pigrizia.
-
-## WORKFLOW DECISIONALE
-
-Per ogni query, segui questo processo:
-
-STEP 1 — ANALISI
-- La domanda è chiara o ambigua?
-- Che tipo di informazione serve? (fattuale, numerica, procedurale, comparativa)
-- Servono dati da più fonti?
-
-STEP 2 — RICERCA
-- Esegui search_knowledge_base con la query più specifica possibile
-- Valuta i risultati: sono pertinenti? Rispondono alla domanda?
-- Se insufficienti: riformula con sinonimi, termini più ampi/specifici
-- Se serve: integra con search_structured_data
-
-STEP 3 — VALIDAZIONE (se il contesto lo richiede)
-- Per informazioni critiche (numeri, date, policy): usa verify_claim
-- Per informazioni da più fonti: confronta e segnala discrepanze
-
-STEP 4 — SINTESI
-- Componi la risposta in modo chiaro e strutturato
-- Includi citazioni esplicite: [Fonte: nome_documento, sezione X]
-- Se ci sono incertezze, dichiarale
-- Se la risposta è parziale, segnala cosa manca
-
-## FORMATO DELLE TOOL CALL
-
-Quando vuoi usare uno strumento, rispondi ESATTAMENTE in questo formato:
-
-<tool_call>
-{"name": "nome_strumento", "arguments": {"param1": "valore1"}}
-</tool_call>
-
-Attendi il risultato prima di proseguire. Puoi fare più tool call in sequenza.
-
-## COMPORTAMENTO IN CASO DI ERRORE
-
-- Se uno strumento fallisce: riprova con parametri diversi (1 volta)
-- Se fallisce di nuovo: segnala il problema e rispondi con quello che hai
-- MAI fingere di aver trovato qualcosa che non hai trovato
-"""
 
 class Orchestrator:
     def __init__(self):
         self.kb = KnowledgeBase()
         self.conversation_history = []
-    
-    def _call_llm(self, messages: list[dict]) -> str:
+
+    # ── Helper: chiamata LLM semplice ──────────────────────────────
+    def _call_llm(self, messages: list[dict], max_tokens: int | None = None) -> str:
+        """Chiamata LLM pura, senza tool. Ritorna solo il testo."""
         response = ollama.chat(
             model=config.model_name,
             messages=messages,
             options={
                 "temperature": config.temperature,
                 "num_ctx": config.num_ctx,
-                "num_predict": config.max_tokens,
+                "num_predict": max_tokens or config.max_tokens,
             }
         )
-        return response["message"]["content"]
-    
-    def _parse_tool_calls(self, response: str) -> list[dict]:
-        """Estrae tool call dal response del modello."""
-        pattern = r"<tool_call>\s*(\{.*?\})\s*</tool_call>"
-        matches = re.findall(pattern, response, re.DOTALL)
-        
-        calls = []
-        for match in matches:
-            try:
-                calls.append(json.loads(match))
-            except json.JSONDecodeError:
-                continue
-        return calls
-    
-    def _parse_tool_calls_robust(self, response: str) -> list[dict]:
-        """Estrae tool call cercando sia tag XML che blocchi JSON liberi."""
-        # 1. Prova con i tag XML (metodo standard)
-        pattern_xml = r"<tool_call>\s*(\{.*?\})\s*</tool_call>"
-        matches = re.findall(pattern_xml, response, re.DOTALL)
-        if matches:
-            calls = []
-            for match in matches:
-                try:
-                    calls.append(json.loads(match))
-                except json.JSONDecodeError:
-                    continue
-            return calls
-            
-        # 2. Fallback: Prova a cercare un JSON object isolato
-        # Cerca { "name": "...", "arguments": { ... } }
-        try:
-            # Pulisce markdown code blocks se presenti (```json ... ```)
-            text = response.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1]
-                if text.endswith("```"):
-                    text = text.rsplit("\n", 1)[0]
-            
-            # Cerca il primo '{' e l'ultimo '}'
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1:
-                json_str = text[start:end+1]
-                data = json.loads(json_str)
-                # Verifica struttura minima
-                if isinstance(data, dict) and "name" in data and "arguments" in data:
-                    return [data]
-        except Exception:
-            pass
-            
-        return []
-    
-    def _execute_tool(self, tool_call: dict) -> str:
-        """Esegue uno strumento e restituisce il risultato."""
-        name = tool_call.get("name")
-        args = tool_call.get("arguments", {})
-        
-        if name == "search_knowledge_base":
-            results = self.kb.search(
-                query=args.get("query", ""),
-                n_results=args.get("n_results", config.max_retrieval_results)
-            )
-            if not results:
-                return "Nessun risultato trovato nella knowledge base per questa query."
-            
-            output = []
-            for r in results:
-                source = r["metadata"].get("source", "sconosciuta")
-                page = r["metadata"].get("page", "")
-                page_str = f", pagina {page}" if page else ""
-                output.append(
-                    f"[Fonte: {source}{page_str}] (similarità: {r['similarity']})\n{r['text']}"
-                )
-            return "\n\n---\n\n".join(output)
-        
-        elif name == "verify_claim":
-            claim = args.get("claim", "")
-            # Cerca conferme/smentite della claim
-            results = self.kb.search(query=claim, n_results=5)
-            if not results:
-                return f"Impossibile verificare: '{claim}' — nessuna fonte trovata."
-            
-            sources_text = "\n".join([
-                f"- [{r['metadata'].get('source', '?')}] {r['text'][:200]}..."
-                for r in results
-            ])
-            return f"Fonti trovate per la verifica di '{claim}':\n{sources_text}"
-        
-        elif name == "ask_user_clarification":
-            # Questo viene gestito a livello di interfaccia
-            return f"CLARIFICATION_NEEDED: {args.get('question', '')}"
-        
+        return response["message"]["content"].strip()
+
+    # ── Step 1: Query Rewriting ────────────────────────────────────
+    def _rewrite_query(self, user_input: str, attempt: int = 0) -> str:
+        """
+        Riformula la domanda dell'utente in una query di ricerca ottimizzata.
+        Al tentativo > 0, chiede esplicitamente di variare la formulazione.
+        """
+        if attempt == 0:
+            prompt = user_input
         else:
-            return f"Strumento '{name}' non riconosciuto."
-    
-    
+            prompt = (
+                f"{user_input}\n\n"
+                f"(La ricerca precedente non ha trovato risultati sufficienti. "
+                f"Tentativo {attempt + 1}: riformula usando termini tecnici diversi, "
+                f"nomi di tabelle, stored procedure, o path API esatti.)"
+            )
+
+        rewritten = self._call_llm(
+            messages=[
+                {"role": "system", "content":
+                 "Sei un esperto di ricerca documentale tecnica. "
+                 "Riformula la domanda dell'utente in una query di ricerca "
+                 "efficace per trovare informazioni in documentazione tecnica "
+                 "di microservizi (API, stored procedure, tabelle Oracle). "
+                 "Rispondi SOLO con la query riformulata, nient'altro. "
+                 "Usa termini tecnici specifici."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=150
+        )
+        return rewritten
+
+    # ── Step 2: Dual KB Search (original + rewritten) ─────────
+    def _search_and_format(self, original_query: str, rewritten_query: str, n_results: int = None) -> tuple[str, int]:
+        """
+        Doppia ricerca: query originale + riscritta, 
+        con deduplicazione per chunk ID e ordinamento per similarità.
+        """
+        n = n_results or config.max_retrieval_results
+        
+        # Ricerca con entrambe le query
+        results_orig = self.kb.search(query=original_query, n_results=n)
+        results_rewr = self.kb.search(query=rewritten_query, n_results=n)
+        
+        # Dedup per ID, tenendo la similarità più alta
+        seen = {}
+        for r in results_orig + results_rewr:
+            rid = r["id"]
+            if rid not in seen or r["similarity"] > seen[rid]["similarity"]:
+                seen[rid] = r
+        
+        # Ordina per similarità decrescente
+        merged = sorted(seen.values(), key=lambda x: x["similarity"], reverse=True)[:n]
+
+        if not merged:
+            return "Nessun risultato trovato nella knowledge base.", 0
+
+        output = []
+        for r in merged:
+            source = r["metadata"].get("source", "sconosciuta")
+            section = r["metadata"].get("section", "")
+            section_str = f" § {section}" if section else ""
+            sim = r["similarity"]
+            output.append(
+                f"[Fonte: {source}{section_str}] (sim: {sim:.3f})\n{r['text']}"
+            )
+
+        return "\n\n---\n\n".join(output), len(merged)
+
+    # ── Step 3: Context Sufficiency Check ──────────────────────────
+    def _is_context_sufficient(self, context: str, user_input: str) -> bool:
+        """
+        Verifica se il contesto recuperato contiene informazioni
+        sufficienti per rispondere alla domanda.
+        """
+        response = self._call_llm(
+            messages=[
+                {"role": "system", "content":
+                 "Rispondi SOLO con SI o NO. Nient'altro."},
+                {"role": "user", "content":
+                 f"Il seguente contesto contiene informazioni sufficienti "
+                 f"per rispondere a questa domanda?\n\n"
+                 f"Domanda: {user_input}\n\n"
+                 f"Contesto (estratto):\n{context[:4000]}"}
+            ],
+            max_tokens=10
+        )
+        return "SI" in response.upper()
+
+    # ── Step 4: Final Answer Generation ────────────────────────────
+    def _generate_answer(self, context: str, user_input: str) -> str:
+        """Genera la risposta finale basandosi sul contesto recuperato."""
+        return self._call_llm(
+            messages=[
+                {"role": "system", "content":
+                 "Sei un assistente tecnico preciso e conciso. "
+                 "Rispondi in ITALIANO, in modo diretto. "
+                 "Usa SOLO le informazioni presenti nel contesto fornito. "
+                 "Non inventare informazioni. "
+                 "Se il contesto non contiene la risposta, dillo esplicitamente."},
+                {"role": "user", "content":
+                 f"Contesto:\n{context}\n\n"
+                 f"Domanda: {user_input}"}
+            ]
+        )
+
+    # ── Pipeline Principale ────────────────────────────────────────
     def query(self, user_input: str, callback=None) -> str:
         """
-        Processo principale: query → tool calls → risposta.
-        callback(msg): funzione opzionale per riportare progresso all'UI.
+        Pipeline RAG Ibrida:
+        1. Query Rewriting (LLM)
+        2. KB Search (automatico)
+        3. Context Check (LLM)
+        4. Answer Generation (LLM)
         """
-        
-        
-        print("\n\n" + "="*50)
+
+        print("\n\n" + "=" * 60)
         print(f"🏁 STARTING QUERY: {user_input}")
-        print("="*50 + "\n")
+        print("=" * 60 + "\n")
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            *self.conversation_history,
-            {"role": "user", "content": user_input}
-        ]
-        
-        max_iterations = 6  # Previene loop infiniti
-        full_response = ""
-        
-        for iteration in range(max_iterations):
-            print(f"\n--- [ITERATION {iteration + 1}] ---")
-            
-            start_time = time.perf_counter()
-            response = self._call_llm(messages)
-            elapsed = time.perf_counter() - start_time
-            
-            print(f"🤖 AGENT RESPONSE ({elapsed:.2f}s):\n{response}\n")
+        max_attempts = 3
+        context = ""
+        sufficient = False
 
-            # Estrai il "pensiero" (testo prima del tool call)
-            thought = response.split("<tool_call>")[0].strip()
-            if thought:
-                print(f"💭 THOUGHT:\n{thought}")
+        for attempt in range(max_attempts):
+            # ── Step 1: Query Rewriting ──
+            t0 = time.perf_counter()
+            rewritten = self._rewrite_query(user_input, attempt=attempt)
+            t1 = time.perf_counter()
+
+            print(f"--- [ATTEMPT {attempt + 1}/{max_attempts}] ---")
+            print(f"📝 REWRITTEN QUERY ({t1 - t0:.2f}s): {rewritten}")
+            if callback:
+                callback(f"🔍 Ricerca: **{rewritten[:80]}**")
+
+            # ── Step 2: Dual KB Search ──
+            t0 = time.perf_counter()
+            context, n_results = self._search_and_format(user_input, rewritten)
+            t1 = time.perf_counter()
+
+            print(f"📄 KB SEARCH ({t1 - t0:.2f}s): {n_results} risultati")
+            if callback:
+                callback(f"📄 Trovati {n_results} risultati")
+
+            if n_results == 0:
+                print("⚠️ Nessun risultato. Riprovo con query diversa.")
                 if callback:
-                    callback(f"🤔 {thought[:200]}...")
-            
-            tool_calls = self._parse_tool_calls_robust(response)
-            
-            if not tool_calls:
-                print("🏁 No tool calls found. Final response.")
-                full_response = response
+                    callback("⚠️ Nessun risultato, riformulo...")
+                continue
+
+            # ── Step 3: Context Check ──
+            t0 = time.perf_counter()
+            sufficient = self._is_context_sufficient(context, user_input)
+            t1 = time.perf_counter()
+
+            print(f"🧪 CONTEXT CHECK ({t1 - t0:.2f}s): {'✅ SUFFICIENTE' if sufficient else '❌ INSUFFICIENTE'}")
+
+            if sufficient:
+                if callback:
+                    callback("✅ Contesto sufficiente, genero risposta...")
                 break
-            
-            # Esegui ogni tool call
-            print(f"🛠️ FOUND {len(tool_calls)} TOOL CALLS: {tool_calls}")
-            tool_results = []
-            
-            for tc in tool_calls:
-                tool_name = tc.get("name", "unknown")
-                tool_args = tc.get("arguments", {})
-                
-                print(f"👉 EXECUTING {tool_name} with args: {tool_args}")
+            else:
+                print("🔄 Contesto insufficiente, riformulo...")
                 if callback:
-                    callback(f"🛠️ Eseguo tool: **{tool_name}** ({str(tool_args)[:100]}...)")
-                
-                t_start = time.perf_counter()
-                result = self._execute_tool(tc)
-                t_elapsed = time.perf_counter() - t_start
-                
-                print(f"✅ TOOL COMPLETED in {t_elapsed:.2f}s")
-                print(f"📄 RESULT PREVIEW: {result[:200]}...")
-                
-                if callback:
-                    match_count = result.lower().count("[fonte:")
-                    preview = result[:100].replace("\n", " ") + "..."
-                    if match_count > 0:
-                        callback(f"📄 Trovati {match_count} risultati. ({preview})")
-                    else:
-                        callback(f"⚠️ Risultato: {preview}")
-                
-                # Gestisci richiesta di chiarimento
-                if result.startswith("CLARIFICATION_NEEDED:"):
-                    question = result.replace("CLARIFICATION_NEEDED: ", "")
-                    # Potremmo dover gestire meglio questo in un loop reale, 
-                    # qui ritorniamo la domanda all'utente
-                    return f"🔍 Ho bisogno di un chiarimento: {question}"
-                
-                tool_results.append({
-                    "tool": tc["name"],
-                    "query": tc["arguments"],
-                    "result": result
-                })
-            
-            # Aggiungi risultati al contesto
-            tool_output = "\n\n".join([
-                f"## Risultato di {tr['tool']}:\n{tr['result']}"
-                for tr in tool_results
-            ])
-            
-            messages.append({"role": "assistant", "content": response})
-            messages.append({"role": "user", "content": f"Ecco i risultati degli strumenti:\n\n{tool_output}\n\nOra prosegui con il tuo workflow."})
-        
-        # Salva nella storia conversazionale
+                    callback("🔄 Contesto insufficiente, riformulo...")
+
+        # ── Step 4: Final Answer ──
+        print("\n--- [FINAL ANSWER GENERATION] ---")
+        t0 = time.perf_counter()
+        answer = self._generate_answer(context, user_input)
+        t1 = time.perf_counter()
+
+        print(f"🤖 ANSWER ({t1 - t0:.2f}s):\n{answer}\n")
+
+        # Aggiorna conversation history
         self.conversation_history.append({"role": "user", "content": user_input})
-        self.conversation_history.append({"role": "assistant", "content": full_response})
-        
-        # Tieni la storia gestibile
+        self.conversation_history.append({"role": "assistant", "content": answer})
         if len(self.conversation_history) > 20:
             self.conversation_history = self.conversation_history[-16:]
-        
-        return full_response
+
+        return answer

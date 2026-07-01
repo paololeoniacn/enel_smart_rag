@@ -68,6 +68,34 @@ cmd_start() {
     "$PYTHON_BIN" main.py
 }
 
+cmd_query() {
+    check_venv
+    local user_query=""
+    shift  # rimuovi il comando 'query' da $@
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user-query)
+                shift
+                user_query="$1"
+                ;;
+            *)
+                # Se non c'è --user-query, tratta tutto come query
+                user_query="$*"
+                break
+                ;;
+        esac
+        shift
+    done
+
+    if [ -z "$user_query" ]; then
+        log_err "Specificare la query: ./handle_project.sh query --user-query \"la tua domanda\""
+        exit 1
+    fi
+
+    log_info "Running query: $user_query"
+    "$PYTHON_BIN" main.py "$user_query"
+}
+
 cmd_ingest() {
     check_venv
     log_info "Starting Document Ingestion..."
@@ -96,12 +124,13 @@ show_help() {
     echo "Usage: ./handle_project.sh [command]"
     echo ""
     echo "Commands:"
-    echo "  install   Create venv and install requirements"
-    echo "  start     Run the CLI agent (main.py)"
-    echo "  web       Run the Web Interface (Streamlit)"
-    echo "  ingest    Run document ingestion"
-    echo "  clean     Remove temporary files"
-    echo "  help      Show this help message"
+    echo "  install                          Create venv and install requirements"
+    echo "  start                            Run the CLI agent (interactive REPL)"
+    echo "  query --user-query \"text\"        Run a single query and print result"
+    echo "  web                              Run the Web Interface (Streamlit)"
+    echo "  ingest                           Run document ingestion"
+    echo "  clean                            Remove temporary files"
+    echo "  help                             Show this help message"
 }
 
 # Main dispatcher
@@ -113,6 +142,7 @@ fi
 case "$1" in
     install) cmd_install ;;
     start)   cmd_start ;;
+    query)   cmd_query "$@" ;;
     web)     cmd_web ;;
     ingest)  cmd_ingest ;;
     clean)   cmd_clean ;;

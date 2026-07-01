@@ -47,26 +47,51 @@ def ingest_directory(directory: str = "./knowledge/docs"):
         print(f"Nessun file trovato in {dir_path}")
         return
 
+    # Reset della collection per re-indicizzazione pulita
+    print(f"🔄 Reset knowledge base...")
+    kb.reset()
+
     total_chunks = 0
+    all_chunks = []  # Per il report finale
+    
     for file_path in files:
         print(f"📄 Processando: {file_path.name}")
         try:
             text = extract_text(file_path)
             if file_path.suffix.lower() == ".md":
-                # Uso il chunker specializzato per i Markdown processati
                 chunks = chunk_markdown_file(text, filename=file_path.name)
             else:
-                # Fallback per altri formati (PDF, DOCX)
                 chunks = chunk_text(text, source=file_path.name)
                 
             kb.add_documents(chunks)
             total_chunks += len(chunks)
+            all_chunks.extend(chunks)
             print(f"   ✓ {len(chunks)} chunk creati")
         except Exception as e:
             print(f"   ✗ Errore: {e}")
     
     print(f"\n✅ Ingestione completata: {len(files)} file → {total_chunks} chunk")
     print(f"   Totale documenti in knowledge base: {kb.count()}")
+    
+    # Report sezioni per documento
+    print(f"\n{'='*70}")
+    print(f"📊 REPORT CONTEXTUAL SECTIONS")
+    print(f"{'='*70}")
+    
+    from collections import defaultdict
+    doc_sections = defaultdict(lambda: defaultdict(int))
+    
+    for c in all_chunks:
+        source = c["metadata"].get("source", "?")
+        section = c["metadata"].get("section", "—")
+        doc_sections[source][section] += 1
+    
+    for source in sorted(doc_sections.keys()):
+        sections = doc_sections[source]
+        total = sum(sections.values())
+        print(f"\n📄 {source} ({total} chunks)")
+        for section, count in sections.items():
+            print(f"   {'├' if section != list(sections.keys())[-1] else '└'}── [{count:2d}] {section}")
 
 
 if __name__ == "__main__":
